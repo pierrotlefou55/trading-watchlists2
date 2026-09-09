@@ -194,48 +194,23 @@ function renderLists() {
   });
 }
 
+function openTradingView(symbol) {
+  if (!symbol) return;
+  window.open(tvUrl(symbol), "_blank", "noopener,noreferrer");
+}
+
 function selectSymbol(symbol) {
   state.selected = symbol;
   els.selectedSymbol.textContent = displayName(symbol);
   els.selectedExchange.textContent = exchangeName(symbol) || "TradingView";
   els.openTV.disabled = false;
-  els.openTV.onclick = () => window.open(tvUrl(symbol), "_blank", "noopener,noreferrer");
+  els.openTV.onclick = () => openTradingView(symbol);
   renderLists();
-  renderChart(symbol);
-}
 
-function renderChart(symbol) {
-  els.chart.innerHTML = "";
-
-  const iframe = document.createElement("iframe");
-  iframe.className = "tv-chart";
-  iframe.src = buildTradingViewWidgetUrl(symbol);
-  iframe.title = `Graphique TradingView ${symbol}`;
-  iframe.setAttribute("allowfullscreen", "");
-  iframe.setAttribute("loading", "eager");
-
-  els.chart.appendChild(iframe);
-}
-
-function buildTradingViewWidgetUrl(symbol) {
-  // TradingView fournit des pages de widgets hébergées sur widgets.tradingview.com.
-  // Le widget est autonome et ne nécessite pas de clé API.
-  const params = new URLSearchParams({
-    symbol,
-    interval: "D",
-    theme: "dark",
-    style: "1",
-    locale: "fr",
-    toolbar_bg: "0b0e11",
-    enable_publishing: "0",
-    hide_top_toolbar: "0",
-    hide_legend: "0",
-    saveimage: "0",
-    hideideas: "1",
-    studies: "[]"
-  });
-
-  return `https://www.tradingview.com/widgetembed/?frameElementId=tradingview_widget&symbol=${encodeURIComponent(symbol)}&interval=D&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=0&toolbarbg=0b0e11&studies=[]&theme=dark&style=1&timezone=Europe%2FParis&locale=fr`;
+  // Ouvre directement la vraie page TradingView dans un nouvel onglet.
+  // Ainsi, la session, les layouts et les indicateurs du compte TradingView
+  // de l'utilisateur sont utilisés. Aucun widget/iframe n'est embarqué ici.
+  openTradingView(symbol);
 }
 
 function openAddSymbolModal(listName = Object.keys(state.lists)[0]) {
@@ -332,9 +307,9 @@ function deleteList(listName) {
     els.openTV.disabled = true;
     els.chart.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">◫</div>
-        <h2>Aucun titre sélectionné</h2>
-        <p>Cliquez sur une valeur dans une watchlist.</p>
+        <div class="empty-icon">↗</div>
+        <h2>TradingView s'ouvre dans un nouvel onglet</h2>
+        <p>Cliquez sur une valeur dans une watchlist pour ouvrir sa page TradingView avec votre session et vos réglages.</p>
       </div>
     `;
   }
@@ -353,9 +328,9 @@ function removeSymbol(listName, symbol) {
     els.openTV.disabled = true;
     els.chart.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">◫</div>
-        <h2>Aucun titre sélectionné</h2>
-        <p>Cliquez sur une valeur dans une watchlist.</p>
+        <div class="empty-icon">↗</div>
+        <h2>TradingView s'ouvre dans un nouvel onglet</h2>
+        <p>Cliquez sur une valeur dans une watchlist pour ouvrir sa page TradingView avec votre session et vos réglages.</p>
       </div>
     `;
   }
