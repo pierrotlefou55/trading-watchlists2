@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Watchlists</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Trading Watchlists</h1>
+      <div class="subtitle">Watchlists personnelles · TradingView</div>
+    </div>
+    <div class="top-actions">
+      <input id="searchInput" type="search" placeholder="Rechercher une valeur..." autocomplete="off">
+      <button id="newListBtn" class="primary">+ Liste</button>
+      <button id="exportBtn">Export</button>
+      <button id="importBtn">Import</button>
+      <input id="importFile" type="file" accept=".json" hidden>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span>WATCHLISTS</span>
+        <button id="addSymbolBtn" title="Ajouter une valeur">+</button>
+      </div>
+      <div id="watchlists"></div>
+    </aside>
+
+    <section class="workspace">
+      <div class="chart-head">
+        <div>
+          <div id="selectedSymbol" class="symbol">Sélectionnez une valeur</div>
+          <div id="selectedExchange" class="exchange">—</div>
+        </div>
+        <div class="chart-actions">
+          <button id="openTradingViewBtn" disabled>↗ TradingView</button>
+        </div>
+      </div>
+
+      <div id="chartContainer" class="chart-container">
+        <div class="empty-state">
+          <div class="empty-icon">◫</div>
+          <h2>Aucun titre sélectionné</h2>
+          <p>Cliquez sur une valeur dans une watchlist.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="modalTitle">Ajouter une valeur</h2>
+      <label>
+        Symbole TradingView
+        <input id="symbolInput" placeholder="NASDAQ:NVDA">
+      </label>
+      <div class="hint">Utilisez le format TradingView, par exemple NASDAQ:NVDA ou AMEX:SPY.</div>
+      <div class="modal-actions">
+        <button id="cancelModalBtn">Annuler</button>
+        <button id="confirmModalBtn" class="primary">Ajouter</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+</body>
+</html>
