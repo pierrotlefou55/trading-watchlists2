@@ -370,3 +370,6 @@ h1 {
     grid-template-columns: 190px 1fr;
   }
 }
+
+
+.symbol-change{min-width:72px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}.quote-up{color:#26a69a}.quote-down{color:#ef5350}.quote-na{color:#687585;font-weight:400}

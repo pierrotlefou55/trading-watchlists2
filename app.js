@@ -52,6 +52,58 @@ let state = {
   drag: null
 };
 
+// Live/near-real-time quote cache. Data is read from Yahoo Finance's public chart endpoint.
+const quotes = new Map();
+let quoteTimer = null;
+const yahooMap = {
+  "SP:SPX": "^GSPC",
+  "NASDAQ:NDX": "^NDX",
+  "TVC:VIX": "^VIX",
+  "TVC:DXY": "DX-Y.NYB",
+  "TVC:GOLD": "GC=F",
+  "TVC:SILVER": "SI=F",
+  "NYMEX:CL1!": "CL=F",
+  "NYMEX:NG1!": "NG=F"
+};
+
+function yahooSymbol(symbol) {
+  if (yahooMap[symbol]) return yahooMap[symbol];
+  return symbol.includes(":") ? symbol.split(":").pop() : symbol;
+}
+
+async function fetchQuote(symbol) {
+  const ticker = yahooSymbol(symbol);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1m&range=1d`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    const meta = json?.chart?.result?.[0]?.meta;
+    if (!meta) throw new Error("No quote");
+
+    let pct = meta.regularMarketChangePercent;
+    if (typeof pct !== "number" && typeof meta.regularMarketPrice === "number" && typeof meta.previousClose === "number" && meta.previousClose) {
+      pct = ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100;
+    }
+    if (typeof pct === "number" && Number.isFinite(pct)) quotes.set(symbol, pct);
+  } catch (error) {
+    console.debug("Quote indisponible pour", symbol, error);
+  }
+}
+
+async function refreshQuotes() {
+  const symbols = [...new Set(Object.values(state.lists).flat())];
+  await Promise.all(symbols.map(fetchQuote));
+  renderLists();
+}
+
+function startQuoteRefresh() {
+  if (quoteTimer) clearInterval(quoteTimer);
+  refreshQuotes();
+  quoteTimer = setInterval(refreshQuotes, 15000);
+}
+
+
 const els = {
   watchlists: document.querySelector("#watchlists"),
   search: document.querySelector("#searchInput"),
@@ -94,7 +146,7 @@ function exchangeName(symbol) {
   return symbol.includes(":") ? symbol.split(":")[0] : "";
 }
 
-function tvUrl(symbol){
+function tvUrl(symbol) {
   return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
 }
 
@@ -147,9 +199,14 @@ function renderLists() {
       row.dataset.symbol = symbol;
       row.dataset.list = listName;
 
+      const change = quotes.get(symbol);
+      const changeText = typeof change === "number" ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%` : "—";
+      const changeClass = typeof change === "number" ? (change >= 0 ? "quote-up" : "quote-down") : "quote-na";
+
       row.innerHTML = `
         <span class="symbol-name">${escapeHtml(displayName(symbol))}</span>
         <span class="symbol-meta symbol-exchange">${escapeHtml(exchangeName(symbol))}</span>
+        <span class="symbol-change ${changeClass}">${changeText}</span>
         <span class="symbol-actions">
           <button class="small-btn delete-symbol" title="Supprimer">×</button>
         </span>
@@ -449,3 +506,4 @@ els.modal.addEventListener("click", e => {
 });
 
 renderLists();
+startQuoteRefresh();
