@@ -94,12 +94,8 @@ function exchangeName(symbol) {
   return symbol.includes(":") ? symbol.split(":")[0] : "";
 }
 
-function tvUrl(symbol) {
-  const [exchange, ticker] = symbol.split(":");
-  if (ticker) {
-    return `https://www.tradingview.com/symbols/${encodeURIComponent(ticker)}/?exchange=${encodeURIComponent(exchange)}`;
-  }
-  return `https://www.tradingview.com/symbols/${encodeURIComponent(symbol)}/`;
+function tvUrl(symbol){
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
 }
 
 function renderLists() {
