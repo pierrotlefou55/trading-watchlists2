@@ -18,6 +18,7 @@
       <button id="newListBtn" class="primary">+ Liste</button>
       <button id="exportBtn">Export</button>
       <button id="importBtn">Import</button>
+      <button id="quotesSettingsBtn">⚙ Cotations</button>
       <input id="importFile" type="file" accept=".json" hidden>
     </div>
   </header>
@@ -63,6 +64,20 @@
       <div class="modal-actions">
         <button id="cancelModalBtn">Annuler</button>
         <button id="confirmModalBtn" class="primary">Ajouter</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="quotesModal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Cotations temps réel</h2>
+      <label>Clé API Finnhub
+        <input id="finnhubKeyInput" type="password" placeholder="Votre clé API Finnhub">
+      </label>
+      <div class="hint">La clé est conservée uniquement dans le stockage local de ce navigateur et n'est pas écrite dans vos fichiers GitHub.</div>
+      <div class="modal-actions">
+        <button id="cancelQuotesBtn">Annuler</button>
+        <button id="saveQuotesBtn" class="primary">Enregistrer</button>
       </div>
     </div>
   </div>

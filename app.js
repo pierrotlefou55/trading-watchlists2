@@ -52,56 +52,11 @@ let state = {
   drag: null
 };
 
-// Live/near-real-time quote cache. Data is read from Yahoo Finance's public chart endpoint.
-const quotes = new Map();
+const FINNHUB_KEY_STORAGE = "finnhub-api-key-v1";
+const QUOTE_REFRESH_MS = 60000;
 let quoteTimer = null;
-const yahooMap = {
-  "SP:SPX": "^GSPC",
-  "NASDAQ:NDX": "^NDX",
-  "TVC:VIX": "^VIX",
-  "TVC:DXY": "DX-Y.NYB",
-  "TVC:GOLD": "GC=F",
-  "TVC:SILVER": "SI=F",
-  "NYMEX:CL1!": "CL=F",
-  "NYMEX:NG1!": "NG=F"
-};
-
-function yahooSymbol(symbol) {
-  if (yahooMap[symbol]) return yahooMap[symbol];
-  return symbol.includes(":") ? symbol.split(":").pop() : symbol;
-}
-
-async function fetchQuote(symbol) {
-  const ticker = yahooSymbol(symbol);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1m&range=1d`;
-  try {
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const json = await response.json();
-    const meta = json?.chart?.result?.[0]?.meta;
-    if (!meta) throw new Error("No quote");
-
-    let pct = meta.regularMarketChangePercent;
-    if (typeof pct !== "number" && typeof meta.regularMarketPrice === "number" && typeof meta.previousClose === "number" && meta.previousClose) {
-      pct = ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100;
-    }
-    if (typeof pct === "number" && Number.isFinite(pct)) quotes.set(symbol, pct);
-  } catch (error) {
-    console.debug("Quote indisponible pour", symbol, error);
-  }
-}
-
-async function refreshQuotes() {
-  const symbols = [...new Set(Object.values(state.lists).flat())];
-  await Promise.all(symbols.map(fetchQuote));
-  renderLists();
-}
-
-function startQuoteRefresh() {
-  if (quoteTimer) clearInterval(quoteTimer);
-  refreshQuotes();
-  quoteTimer = setInterval(refreshQuotes, 15000);
-}
+let quoteRequestInFlight = false;
+let quoteValues = {};
 
 
 const els = {
@@ -116,6 +71,11 @@ const els = {
   exportBtn: document.querySelector("#exportBtn"),
   importBtn: document.querySelector("#importBtn"),
   importFile: document.querySelector("#importFile"),
+  quotesSettingsBtn: document.querySelector("#quotesSettingsBtn"),
+  quotesModal: document.querySelector("#quotesModal"),
+  finnhubKeyInput: document.querySelector("#finnhubKeyInput"),
+  cancelQuotesBtn: document.querySelector("#cancelQuotesBtn"),
+  saveQuotesBtn: document.querySelector("#saveQuotesBtn"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modalTitle"),
   symbolInput: document.querySelector("#symbolInput"),
@@ -148,6 +108,90 @@ function exchangeName(symbol) {
 
 function tvUrl(symbol) {
   return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
+}
+
+function getFinnhubKey() {
+  return localStorage.getItem(FINNHUB_KEY_STORAGE) || "";
+}
+
+function openQuotesSettings() {
+  els.finnhubKeyInput.value = getFinnhubKey();
+  els.quotesModal.classList.remove("hidden");
+  setTimeout(() => els.finnhubKeyInput.focus(), 0);
+}
+
+function closeQuotesSettings() {
+  els.quotesModal.classList.add("hidden");
+}
+
+function saveQuotesSettings() {
+  const key = els.finnhubKeyInput.value.trim();
+  if (key) localStorage.setItem(FINNHUB_KEY_STORAGE, key);
+  else localStorage.removeItem(FINNHUB_KEY_STORAGE);
+  closeQuotesSettings();
+  showToast(key ? "Clé Finnhub enregistrée." : "Cotations désactivées.");
+  refreshQuotes();
+}
+
+function quoteSymbol(symbol) {
+  const [exchange, ticker] = symbol.split(":");
+  if (!ticker) return ticker || symbol;
+  // Finnhub's free quote endpoint covers US-listed stocks and ETFs.
+  // Keep the raw ticker; exchange prefixes are TradingView-specific here.
+  return ticker.replace(/!$/, "");
+}
+
+async function fetchQuote(symbol) {
+  const key = getFinnhubKey();
+  if (!key) return null;
+  const ticker = quoteSymbol(symbol);
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
+  const response = await fetch(url, { method: "GET" });
+  if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
+  const data = await response.json();
+  if (!data || typeof data.dp !== "number") return null;
+  return { percent: data.dp, price: data.c, timestamp: data.t };
+}
+
+async function refreshQuotes() {
+  if (quoteRequestInFlight) return;
+  const key = getFinnhubKey();
+  if (!key) {
+    renderLists();
+refreshQuotes();
+clearInterval(quoteTimer);
+quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
+    return;
+  }
+
+  quoteRequestInFlight = true;
+  // Refresh all unique symbols. The default lists contain fewer than 60 symbols,
+  // which fits the free Finnhub allowance when refreshing once per minute.
+  const targets = [...new Set(Object.values(state.lists).flat())];
+
+  try {
+    // Small delay between calls avoids bursting the API and makes rate limiting less likely.
+    for (const symbol of targets) {
+      try {
+        const q = await fetchQuote(symbol);
+        if (q) quoteValues[symbol] = q;
+      } catch (err) {
+        console.warn("Quote unavailable for", symbol, err);
+      }
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    renderLists();
+  } finally {
+    quoteRequestInFlight = false;
+  }
+}
+
+function quoteMarkup(symbol) {
+  const q = quoteValues[symbol];
+  if (!q || !Number.isFinite(q.percent)) return `<span class="quote-change muted">—</span>`;
+  const cls = q.percent > 0 ? "up" : q.percent < 0 ? "down" : "muted";
+  const sign = q.percent > 0 ? "+" : "";
+  return `<span class="quote-change ${cls}" title="Variation du jour">${sign}${q.percent.toFixed(2).replace(".", ",")} %</span>`;
 }
 
 function renderLists() {
@@ -199,14 +243,10 @@ function renderLists() {
       row.dataset.symbol = symbol;
       row.dataset.list = listName;
 
-      const change = quotes.get(symbol);
-      const changeText = typeof change === "number" ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%` : "—";
-      const changeClass = typeof change === "number" ? (change >= 0 ? "quote-up" : "quote-down") : "quote-na";
-
       row.innerHTML = `
         <span class="symbol-name">${escapeHtml(displayName(symbol))}</span>
         <span class="symbol-meta symbol-exchange">${escapeHtml(exchangeName(symbol))}</span>
-        <span class="symbol-change ${changeClass}">${changeText}</span>
+        ${quoteMarkup(symbol)}
         <span class="symbol-actions">
           <button class="small-btn delete-symbol" title="Supprimer">×</button>
         </span>
@@ -486,6 +526,13 @@ function showToast(message) {
   }, 1800);
 }
 
+els.quotesSettingsBtn.onclick = openQuotesSettings;
+els.cancelQuotesBtn.onclick = closeQuotesSettings;
+els.saveQuotesBtn.onclick = saveQuotesSettings;
+els.quotesModal.addEventListener("click", e => {
+  if (e.target === els.quotesModal) closeQuotesSettings();
+});
+
 els.newList.onclick = createList;
 els.addSymbol.onclick = () => openAddSymbolModal();
 els.exportBtn.onclick = exportLists;
@@ -506,4 +553,3 @@ els.modal.addEventListener("click", e => {
 });
 
 renderLists();
-startQuoteRefresh();
