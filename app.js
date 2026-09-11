@@ -1,48 +1,49 @@
 const STORAGE_KEY = "trading-watchlists.json";
 
-const DEFAULT_LISTS = {
-  "TECH": [
-    "NASDAQ:NVDA",
-    "NASDAQ:AMD",
-    "NASDAQ:AVGO",
-    "NASDAQ:MSFT",
-    "NASDAQ:GOOGL",
-    "NASDAQ:AMZN",
-    "NASDAQ:META",
-    "NASDAQ:AAPL"
+const DEFAULT_LISTS =
+{
+  "Indices": [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "FEZ",
+    "DAX",
+    "CAC",
+    "JPXN",
+    "TLT",
+    "BNO",
+    "VIX"
   ],
-  "ETF": [
-    "AMEX:SPY",
-    "NASDAQ:QQQ",
-    "AMEX:GLD",
-    "NASDAQ:TLT",
-    "AMEX:SLV",
-    "AMEX:IWM"
+  "Matières premières": [
+    "GOLD",
+    "SLV",
+    "EART",
+    "CPER",
+    "PLTM"
   ],
-  "MOMENTUM": [
-    "NASDAQ:PLTR",
-    "NASDAQ:CRWD",
-    "NASDAQ:TSLA",
-    "NASDAQ:MU",
-    "NASDAQ:ARM"
+  "Crypto": [
+    "BTCUSD",
+    "ETHUSD",
+    "SOLUSD",
+    "XRPUSD"
   ],
-  "INDEX": [
-    "SP:SPX",
-    "NASDAQ:NDX",
-    "TVC:VIX",
-    "TVC:DXY"
-  ],
-  "COMMODITIES": [
-    "TVC:GOLD",
-    "TVC:SILVER",
-    "NYMEX:CL1!",
-    "NYMEX:NG1!"
-  ],
-  "WATCH": [
-    "NYSE:JPM",
-    "NYSE:LLY",
-    "NYSE:CAT",
-    "NYSE:GE"
+  "PEA Positions": [
+    "LVE",
+    "ASML",
+    "CL2",
+    "MRK",
+    "TTE",
+    "ENR",
+    "AIR",
+    "BAYN",
+    "IBE",
+    "VID",
+    "RDC",
+    "LHA",
+    "BN",
+    "MTX",
+    "NAE",
+    "MLP"
   ]
 };
 
