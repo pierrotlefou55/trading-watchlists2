@@ -1,4 +1,4 @@
-const STORAGE_KEY = "trading-watchlists-v1";
+const STORAGE_KEY = "trading-watchlists";
 
 const DEFAULT_LISTS = {
   "TECH": [
