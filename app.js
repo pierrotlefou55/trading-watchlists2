@@ -57,7 +57,7 @@ const QUOTE_REFRESH_MS = 60000;
 let quoteTimer = null;
 let quoteRequestInFlight = false;
 let quoteValues = {};
-const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v1";
+const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v2";
 let symbolProfiles = {};
 try {
   symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
@@ -77,6 +77,7 @@ const els = {
   addSymbol: document.querySelector("#addSymbolBtn"),
   exportBtn: document.querySelector("#exportBtn"),
   importBtn: document.querySelector("#importBtn"),
+  resetListsBtn: document.querySelector("#resetListsBtn"),
   importFile: document.querySelector("#importFile"),
   quotesSettingsBtn: document.querySelector("#quotesSettingsBtn"),
   quotesModal: document.querySelector("#quotesModal"),
@@ -205,7 +206,7 @@ async function fetchSymbolProfile(symbol) {
   const response = await fetch(url, { method: "GET" });
   if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
   const data = await response.json();
-  const label = data && (data.name || data.ticker) ? (data.name || data.ticker) : "";
+  const label = data && typeof data.name === "string" ? data.name.trim() : "";
   if (label) {
     symbolProfiles[symbol] = label;
     localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
@@ -232,6 +233,9 @@ async function refreshSymbolLabels() {
     await new Promise(resolve => setTimeout(resolve, 80));
   }
   renderLists();
+  if (state.selected) {
+    els.selectedExchange.textContent = getSymbolLabel(state.selected) || "";
+  }
 }
 
 function quoteMarkup(symbol) {
@@ -293,7 +297,6 @@ function renderLists() {
 
       row.innerHTML = `
         <span class="symbol-name">${escapeHtml(displayName(symbol))}</span>
-        <span class="symbol-meta symbol-exchange">${escapeHtml(exchangeName(symbol))}</span>
         <span class="product-label">${escapeHtml(getSymbolLabel(symbol))}</span>
         ${quoteMarkup(symbol)}
         <span class="symbol-actions">
@@ -344,7 +347,7 @@ function openTradingView(symbol) {
 function selectSymbol(symbol) {
   state.selected = symbol;
   els.selectedSymbol.textContent = displayName(symbol);
-  els.selectedExchange.textContent = exchangeName(symbol) || "TradingView";
+  els.selectedExchange.textContent = getSymbolLabel(symbol) || "";
   els.openTV.disabled = false;
   els.openTV.onclick = () => openTradingView(symbol);
   renderLists();
@@ -401,6 +404,17 @@ function confirmModal() {
   selectSymbol(symbol);
   refreshSymbolLabels();
   showToast(`${symbol} ajouté.`);
+}
+
+function resetListsFromSite() {
+  if (!confirm("Remplacer vos watchlists actuelles par les listes intégrées au site ?")) return;
+  state.lists = structuredClone(DEFAULT_LISTS);
+  state.selected = null;
+  saveLists();
+  renderLists();
+  refreshQuotes();
+  refreshSymbolLabels();
+  showToast("Listes du site rechargées.");
 }
 
 function createList() {
@@ -588,6 +602,7 @@ els.newList.onclick = createList;
 els.addSymbol.onclick = () => openAddSymbolModal();
 els.exportBtn.onclick = exportLists;
 els.importBtn.onclick = importLists;
+els.resetListsBtn.onclick = resetListsFromSite;
 els.importFile.onchange = handleImport;
 els.cancelModal.onclick = closeModal;
 els.confirmModal.onclick = confirmModal;
