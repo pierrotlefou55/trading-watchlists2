@@ -56,14 +56,72 @@ const FINNHUB_KEY_STORAGE = "finnhub-api-key-v1";
 const QUOTE_REFRESH_MS = 60000;
 let quoteTimer = null;
 let quoteRequestInFlight = false;
+let labelsRequestInFlight = false;
 let quoteValues = {};
-const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v2";
+
+const QUOTE_UNAVAILABLE_STORAGE = "trading-quote-unavailable-v1";
+const QUOTE_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h: on retente de temps en temps, au cas où Finnhub couvrirait un jour ce symbole
+let quoteUnavailable = {};
+try {
+  quoteUnavailable = JSON.parse(localStorage.getItem(QUOTE_UNAVAILABLE_STORAGE) || "{}");
+} catch (e) {
+  quoteUnavailable = {};
+}
+
+// Le endpoint /quote gratuit de Finnhub ne comprend que des tickers actions/ETF US classiques.
+// Les indices (SPX, NDX, VIX, DXY) et les futures en notation continue (CL1!, NG1!) ne sont
+// pas des symboles /quote valides côté gratuit : inutile de retaper l'API à chaque minute.
+const KNOWN_NON_QUOTABLE = new Set([
+  "SP:SPX", "NASDAQ:NDX", "TVC:VIX", "TVC:DXY", "TVC:GOLD", "TVC:SILVER",
+  "NYMEX:CL1!", "NYMEX:NG1!"
+]);
+
+function markQuoteUnavailable(symbol) {
+  quoteUnavailable[symbol] = Date.now();
+  localStorage.setItem(QUOTE_UNAVAILABLE_STORAGE, JSON.stringify(quoteUnavailable));
+}
+
+function clearQuoteUnavailable(symbol) {
+  if (quoteUnavailable[symbol] === undefined) return;
+  delete quoteUnavailable[symbol];
+  localStorage.setItem(QUOTE_UNAVAILABLE_STORAGE, JSON.stringify(quoteUnavailable));
+}
+
+function isQuoteSkippable(symbol) {
+  if (KNOWN_NON_QUOTABLE.has(symbol)) return true;
+  const failedAt = quoteUnavailable[symbol];
+  return typeof failedAt === "number" && (Date.now() - failedAt) < QUOTE_RETRY_COOLDOWN_MS;
+}
+
+const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v3";
 let symbolProfiles = {};
 try {
   symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
 } catch (e) {
   symbolProfiles = {};
 }
+
+// Finnhub's free "stock/profile2" endpoint only covers equities (company profiles).
+// ETFs, indices and futures continuistes return an empty {} on the free tier
+// (the dedicated /etf/profile endpoint is a paid add-on: see finnhub.io/pricing-etf-indices).
+// We short-circuit those with a small local dictionary so their label is instant,
+// reliable, and costs zero API calls.
+const KNOWN_LABELS = {
+  "AMEX:SPY": "SPDR S&P 500 ETF Trust",
+  "NASDAQ:QQQ": "Invesco QQQ Trust",
+  "AMEX:GLD": "SPDR Gold Shares",
+  "NASDAQ:TLT": "iShares 20+ Year Treasury Bond ETF",
+  "AMEX:SLV": "iShares Silver Trust",
+  "AMEX:IWM": "iShares Russell 2000 ETF",
+  "SP:SPX": "S&P 500 Index",
+  "NASDAQ:NDX": "Nasdaq-100 Index",
+  "TVC:VIX": "CBOE Volatility Index",
+  "TVC:DXY": "US Dollar Index",
+  "TVC:GOLD": "Gold Spot",
+  "TVC:SILVER": "Silver Spot",
+  "NYMEX:CL1!": "WTI Crude Oil Futures",
+  "NYMEX:NG1!": "Natural Gas Futures"
+};
 
 
 const els = {
@@ -132,14 +190,20 @@ function closeQuotesSettings() {
   els.quotesModal.classList.add("hidden");
 }
 
+async function refreshAll() {
+  // Enchaînées, pas en parallèle : les deux tapent le même quota Finnhub
+  // (60 appels/minute côté gratuit), donc autant éviter de les cumuler.
+  await refreshQuotes();
+  await refreshSymbolLabels();
+}
+
 function saveQuotesSettings() {
   const key = els.finnhubKeyInput.value.trim();
   if (key) localStorage.setItem(FINNHUB_KEY_STORAGE, key);
   else localStorage.removeItem(FINNHUB_KEY_STORAGE);
   closeQuotesSettings();
   showToast(key ? "Clé Finnhub enregistrée." : "Cotations désactivées.");
-  refreshQuotes();
-  refreshSymbolLabels();
+  refreshAll();
 }
 
 function quoteSymbol(symbol) {
@@ -154,8 +218,8 @@ async function fetchQuote(symbol) {
   const key = getFinnhubKey();
   if (!key) return null;
   const ticker = quoteSymbol(symbol);
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
-  const response = await fetch(url, { method: "GET" });
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}`;
+  const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
   if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
   const data = await response.json();
   if (!data || typeof data.dp !== "number") return null;
@@ -171,18 +235,25 @@ async function refreshQuotes() {
   }
 
   quoteRequestInFlight = true;
-  // Refresh all unique symbols. The default lists contain fewer than 60 symbols,
-  // which fits the free Finnhub allowance when refreshing once per minute.
-  const targets = [...new Set(Object.values(state.lists).flat())];
+  // On ne cible que les symboles réellement cotables ; les indices/futures connus
+  // et les échecs récents (cooldown 6h) sont exclus avant même le premier appel.
+  const targets = [...new Set(Object.values(state.lists).flat())]
+    .filter(symbol => !isQuoteSkippable(symbol));
 
   try {
     // Small delay between calls avoids bursting the API and makes rate limiting less likely.
     for (const symbol of targets) {
       try {
         const q = await fetchQuote(symbol);
-        if (q) quoteValues[symbol] = q;
+        if (q) {
+          quoteValues[symbol] = q;
+          clearQuoteUnavailable(symbol);
+        } else {
+          markQuoteUnavailable(symbol);
+        }
       } catch (err) {
         console.warn("Quote unavailable for", symbol, err);
+        markQuoteUnavailable(symbol);
       }
       await new Promise(resolve => setTimeout(resolve, 80));
     }
@@ -198,20 +269,61 @@ function profileSymbol(symbol) {
   return ticker;
 }
 
+function cacheLabel(symbol, label) {
+  // "" is a valid cached outcome: it means "we looked, Finnhub has nothing for
+  // this symbol on the free tier". That stops refreshSymbolLabels from retrying
+  // it forever and burning the 60 calls/minute free quota on the same misses.
+  symbolProfiles[symbol] = label;
+  localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
+}
+
 async function fetchSymbolProfile(symbol) {
   const key = getFinnhubKey();
   if (!key) return null;
-  const ticker = profileSymbol(symbol);
-  const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
-  const response = await fetch(url, { method: "GET" });
-  if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
-  const data = await response.json();
-  const label = data && typeof data.name === "string" ? data.name.trim() : "";
-  if (label) {
-    symbolProfiles[symbol] = label;
-    localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
-    return label;
+
+  if (KNOWN_LABELS[symbol]) {
+    cacheLabel(symbol, KNOWN_LABELS[symbol]);
+    return KNOWN_LABELS[symbol];
   }
+
+  const ticker = profileSymbol(symbol);
+
+  // 1) stock/profile2: works for company stocks, empty {} for ETFs/indices/futures.
+  try {
+    const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}`;
+    const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
+    if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
+    const data = await response.json();
+    const label = data && typeof data.name === "string" ? data.name.trim() : "";
+    if (label) {
+      cacheLabel(symbol, label);
+      return label;
+    }
+  } catch (err) {
+    console.warn("stock/profile2 indisponible pour", symbol, err);
+  }
+
+  // 2) Fallback for ETFs not in KNOWN_LABELS: the free /search endpoint indexes
+  // ETFs too (unlike profile2) and returns a "description" per matching symbol.
+  try {
+    const url = `https://finnhub.io/api/v1/search?q=${encodeURIComponent(ticker)}`;
+    const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
+    if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
+    const data = await response.json();
+    const match = Array.isArray(data?.result)
+      ? data.result.find(r => r.symbol === ticker || r.displaySymbol === ticker)
+      : null;
+    const label = match && typeof match.description === "string" ? match.description.trim() : "";
+    if (label) {
+      cacheLabel(symbol, label);
+      return label;
+    }
+  } catch (err) {
+    console.warn("/search indisponible pour", symbol, err);
+  }
+
+  // Nothing found anywhere: cache the miss so we don't retry every refresh.
+  cacheLabel(symbol, "");
   return null;
 }
 
@@ -220,21 +332,30 @@ function getSymbolLabel(symbol) {
 }
 
 async function refreshSymbolLabels() {
+  if (labelsRequestInFlight) return;
   const key = getFinnhubKey();
   if (!key) return;
-  const targets = [...new Set(Object.values(state.lists).flat())]
-    .filter(symbol => !getSymbolLabel(symbol));
-  for (const symbol of targets) {
-    try {
-      await fetchSymbolProfile(symbol);
-    } catch (err) {
-      console.warn("Libellé indisponible pour", symbol, err);
+
+  labelsRequestInFlight = true;
+  try {
+    // Only fetch symbols never looked up before (undefined), not just "no label yet" -
+    // a cached "" means we already tried and Finnhub has nothing, so skip it.
+    const targets = [...new Set(Object.values(state.lists).flat())]
+      .filter(symbol => symbolProfiles[symbol] === undefined);
+    for (const symbol of targets) {
+      try {
+        await fetchSymbolProfile(symbol);
+      } catch (err) {
+        console.warn("Libellé indisponible pour", symbol, err);
+      }
+      await new Promise(resolve => setTimeout(resolve, 80));
     }
-    await new Promise(resolve => setTimeout(resolve, 80));
-  }
-  renderLists();
-  if (state.selected) {
-    els.selectedExchange.textContent = getSymbolLabel(state.selected) || "";
+    renderLists();
+    if (state.selected) {
+      els.selectedExchange.textContent = getSymbolLabel(state.selected) || "";
+    }
+  } finally {
+    labelsRequestInFlight = false;
   }
 }
 
@@ -331,6 +452,21 @@ function renderLists() {
       list.appendChild(row);
     });
 
+    // Zone de dépôt après le dernier élément : sans elle, impossible de déplacer
+    // une valeur en toute fin de liste (on ne peut viser que les lignes existantes).
+    const dropzone = document.createElement("div");
+    dropzone.className = "list-dropzone";
+    dropzone.addEventListener("dragover", e => e.preventDefault());
+    dropzone.addEventListener("dragenter", () => dropzone.classList.add("drop-target"));
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drop-target"));
+    dropzone.addEventListener("drop", e => {
+      e.preventDefault();
+      dropzone.classList.remove("drop-target");
+      if (!state.drag) return;
+      moveSymbol(state.drag.symbol, state.drag.fromList, listName, null);
+    });
+    list.appendChild(dropzone);
+
     if (query && visibleSymbols.length === 0) {
       return;
     }
@@ -412,8 +548,7 @@ function resetListsFromSite() {
   state.selected = null;
   saveLists();
   renderLists();
-  refreshQuotes();
-  refreshSymbolLabels();
+  refreshAll();
   showToast("Listes du site rechargées.");
 }
 
@@ -620,8 +755,7 @@ els.modal.addEventListener("click", e => {
 
 renderLists();
 
-// Initialisation des cotations et des libellés, puis actualisation des cotations chaque minute.
-refreshQuotes();
-refreshSymbolLabels();
+// Initialisation des cotations et des libellés (séquentiel), puis actualisation des cotations chaque minute.
+refreshAll();
 clearInterval(quoteTimer);
 quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);

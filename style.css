@@ -375,6 +375,16 @@ h1 {
 .quote-change.muted { color:var(--muted); font-weight:500; }
 #quotesSettingsBtn { white-space:nowrap; }
 
+.list-dropzone {
+  min-height: 12px;
+  border-top: 2px solid transparent;
+}
+
+.list-dropzone.drop-target {
+  border-top-color: var(--accent);
+  background: rgba(77, 163, 255, .08);
+}
+
 .product-label {
   color: #7f8b99;
   font-size: 12px;
