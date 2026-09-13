@@ -59,7 +59,7 @@ let quoteRequestInFlight = false;
 let labelsRequestInFlight = false;
 let quoteValues = {};
 
-const QUOTE_UNAVAILABLE_STORAGE = "trading-quote-unavailable-v1";
+const QUOTE_UNAVAILABLE_STORAGE = "trading-quote-unavailable-v2";
 const QUOTE_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h: on retente de temps en temps, au cas où Finnhub couvrirait un jour ce symbole
 let quoteUnavailable = {};
 try {
@@ -93,7 +93,7 @@ function isQuoteSkippable(symbol) {
   return typeof failedAt === "number" && (Date.now() - failedAt) < QUOTE_RETRY_COOLDOWN_MS;
 }
 
-const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v3";
+const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v4";
 let symbolProfiles = {};
 try {
   symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
@@ -218,8 +218,8 @@ async function fetchQuote(symbol) {
   const key = getFinnhubKey();
   if (!key) return null;
   const ticker = quoteSymbol(symbol);
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}`;
-  const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
+  const response = await fetch(url, { method: "GET" });
   if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
   const data = await response.json();
   if (!data || typeof data.dp !== "number") return null;
@@ -290,8 +290,8 @@ async function fetchSymbolProfile(symbol) {
 
   // 1) stock/profile2: works for company stocks, empty {} for ETFs/indices/futures.
   try {
-    const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}`;
-    const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
+    const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
+    const response = await fetch(url, { method: "GET" });
     if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
     const data = await response.json();
     const label = data && typeof data.name === "string" ? data.name.trim() : "";
@@ -306,8 +306,8 @@ async function fetchSymbolProfile(symbol) {
   // 2) Fallback for ETFs not in KNOWN_LABELS: the free /search endpoint indexes
   // ETFs too (unlike profile2) and returns a "description" per matching symbol.
   try {
-    const url = `https://finnhub.io/api/v1/search?q=${encodeURIComponent(ticker)}`;
-    const response = await fetch(url, { method: "GET", headers: { "X-Finnhub-Token": key } });
+    const url = `https://finnhub.io/api/v1/search?q=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
+    const response = await fetch(url, { method: "GET" });
     if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
     const data = await response.json();
     const match = Array.isArray(data?.result)
