@@ -79,7 +79,6 @@ const els = {
   importBtn: document.querySelector("#importBtn"),
   importFile: document.querySelector("#importFile"),
   quotesSettingsBtn: document.querySelector("#quotesSettingsBtn"),
-  resetListsBtn: document.querySelector("#resetListsBtn"),
   quotesModal: document.querySelector("#quotesModal"),
   finnhubKeyInput: document.querySelector("#finnhubKeyInput"),
   cancelQuotesBtn: document.querySelector("#cancelQuotesBtn"),
@@ -504,22 +503,6 @@ function moveSymbol(symbol, fromList, toList, beforeSymbol) {
   renderLists();
 }
 
-
-function resetListsFromSite() {
-  if (!confirm("Remplacer vos watchlists actuelles par les listes intégrées à cette version du site ?\n\nVos listes locales actuelles seront remplacées. La clé Finnhub sera conservée.")) return;
-
-  state.lists = structuredClone(DEFAULT_LISTS);
-  state.selected = null;
-  saveLists();
-  els.selectedSymbol.textContent = "Sélectionnez une valeur";
-  els.selectedExchange.textContent = "—";
-  els.openTV.disabled = true;
-  renderLists();
-  refreshQuotes();
-  refreshSymbolLabels();
-  showToast("Listes du site rechargées.");
-}
-
 function exportLists() {
   const blob = new Blob(
     [JSON.stringify(state.lists, null, 2)],
@@ -595,7 +578,6 @@ function showToast(message) {
 }
 
 els.quotesSettingsBtn.onclick = openQuotesSettings;
-els.resetListsBtn.onclick = resetListsFromSite;
 els.cancelQuotesBtn.onclick = closeQuotesSettings;
 els.saveQuotesBtn.onclick = saveQuotesSettings;
 els.quotesModal.addEventListener("click", e => {
