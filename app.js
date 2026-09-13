@@ -1,6 +1,9 @@
 const STORAGE_KEY = "trading-watchlists-v1";
 
-const DEFAULT_LISTS = {
+// Filet de sécurité UNIQUEMENT si default-lists.json est absent ou illisible
+// (ex: app ouverte en file:// où fetch() est bloqué). Le vrai contenu par
+// défaut vit désormais dans default-lists.json, jamais dans ce fichier.
+const FALLBACK_LISTS = {
   "TECH": [
     "NASDAQ:NVDA",
     "NASDAQ:AMD",
@@ -18,36 +21,31 @@ const DEFAULT_LISTS = {
     "NASDAQ:TLT",
     "AMEX:SLV",
     "AMEX:IWM"
-  ],
-  "MOMENTUM": [
-    "NASDAQ:PLTR",
-    "NASDAQ:CRWD",
-    "NASDAQ:TSLA",
-    "NASDAQ:MU",
-    "NASDAQ:ARM"
-  ],
-  "INDEX": [
-    "SP:SPX",
-    "NASDAQ:NDX",
-    "TVC:VIX",
-    "TVC:DXY"
-  ],
-  "COMMODITIES": [
-    "TVC:GOLD",
-    "TVC:SILVER",
-    "NYMEX:CL1!",
-    "NYMEX:NG1!"
-  ],
-  "WATCH": [
-    "NYSE:JPM",
-    "NYSE:LLY",
-    "NYSE:CAT",
-    "NYSE:GE"
   ]
 };
 
+const DEFAULT_LISTS_URL = "./default-lists.json";
+let cachedDefaultLists = null;
+
+async function fetchDefaultLists() {
+  if (cachedDefaultLists) return cachedDefaultLists;
+  try {
+    const response = await fetch(DEFAULT_LISTS_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("Format invalide dans default-lists.json");
+    }
+    cachedDefaultLists = data;
+  } catch (err) {
+    console.warn("default-lists.json indisponible, repli sur les listes intégrées.", err);
+    cachedDefaultLists = FALLBACK_LISTS;
+  }
+  return cachedDefaultLists;
+}
+
 let state = {
-  lists: loadLists(),
+  lists: {},
   selected: null,
   drag: null
 };
@@ -150,14 +148,14 @@ const els = {
   toast: document.querySelector("#toast")
 };
 
-function loadLists() {
+async function loadLists() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {
     console.warn("Impossible de lire les watchlists", e);
   }
-  return structuredClone(DEFAULT_LISTS);
+  return structuredClone(await fetchDefaultLists());
 }
 
 function saveLists() {
@@ -542,9 +540,9 @@ function confirmModal() {
   showToast(`${symbol} ajouté.`);
 }
 
-function resetListsFromSite() {
+async function resetListsFromSite() {
   if (!confirm("Remplacer vos watchlists actuelles par les listes intégrées au site ?")) return;
-  state.lists = structuredClone(DEFAULT_LISTS);
+  state.lists = structuredClone(await fetchDefaultLists());
   state.selected = null;
   saveLists();
   renderLists();
@@ -753,9 +751,14 @@ els.modal.addEventListener("click", e => {
   if (e.target === els.modal) closeModal();
 });
 
-renderLists();
+async function init() {
+  state.lists = await loadLists();
+  renderLists();
 
-// Initialisation des cotations et des libellés (séquentiel), puis actualisation des cotations chaque minute.
-refreshAll();
-clearInterval(quoteTimer);
-quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
+  // Initialisation des cotations et des libellés (séquentiel), puis actualisation des cotations chaque minute.
+  await refreshAll();
+  clearInterval(quoteTimer);
+  quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
+}
+
+init();
