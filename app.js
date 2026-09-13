@@ -1,49 +1,48 @@
-const STORAGE_KEY = "trading-watchlists.json";
+const STORAGE_KEY = "trading-watchlists-v1";
 
-const DEFAULT_LISTS =
-{
-  "Indices": [
-    "SPY",
-    "QQQ",
-    "IWM",
-    "FEZ",
-    "DAX",
-    "CAC",
-    "JPXN",
-    "TLT",
-    "BNO",
-    "VIX"
+const DEFAULT_LISTS = {
+  "TECH": [
+    "NASDAQ:NVDA",
+    "NASDAQ:AMD",
+    "NASDAQ:AVGO",
+    "NASDAQ:MSFT",
+    "NASDAQ:GOOGL",
+    "NASDAQ:AMZN",
+    "NASDAQ:META",
+    "NASDAQ:AAPL"
   ],
-  "Matières premières": [
-    "GOLD",
-    "SLV",
-    "EART",
-    "CPER",
-    "PLTM"
+  "ETF": [
+    "AMEX:SPY",
+    "NASDAQ:QQQ",
+    "AMEX:GLD",
+    "NASDAQ:TLT",
+    "AMEX:SLV",
+    "AMEX:IWM"
   ],
-  "Crypto": [
-    "BTCUSD",
-    "ETHUSD",
-    "SOLUSD",
-    "XRPUSD"
+  "MOMENTUM": [
+    "NASDAQ:PLTR",
+    "NASDAQ:CRWD",
+    "NASDAQ:TSLA",
+    "NASDAQ:MU",
+    "NASDAQ:ARM"
   ],
-  "PEA Positions": [
-    "LVE",
-    "ASML",
-    "CL2",
-    "MRK",
-    "TTE",
-    "ENR",
-    "AIR",
-    "BAYN",
-    "IBE",
-    "VID",
-    "RDC",
-    "LHA",
-    "BN",
-    "MTX",
-    "NAE",
-    "MLP"
+  "INDEX": [
+    "SP:SPX",
+    "NASDAQ:NDX",
+    "TVC:VIX",
+    "TVC:DXY"
+  ],
+  "COMMODITIES": [
+    "TVC:GOLD",
+    "TVC:SILVER",
+    "NYMEX:CL1!",
+    "NYMEX:NG1!"
+  ],
+  "WATCH": [
+    "NYSE:JPM",
+    "NYSE:LLY",
+    "NYSE:CAT",
+    "NYSE:GE"
   ]
 };
 
@@ -58,6 +57,13 @@ const QUOTE_REFRESH_MS = 60000;
 let quoteTimer = null;
 let quoteRequestInFlight = false;
 let quoteValues = {};
+const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v1";
+let symbolProfiles = {};
+try {
+  symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
+} catch (e) {
+  symbolProfiles = {};
+}
 
 
 const els = {
@@ -132,6 +138,7 @@ function saveQuotesSettings() {
   closeQuotesSettings();
   showToast(key ? "Clé Finnhub enregistrée." : "Cotations désactivées.");
   refreshQuotes();
+  refreshSymbolLabels();
 }
 
 function quoteSymbol(symbol) {
@@ -159,9 +166,6 @@ async function refreshQuotes() {
   const key = getFinnhubKey();
   if (!key) {
     renderLists();
-refreshQuotes();
-clearInterval(quoteTimer);
-quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
     return;
   }
 
@@ -185,6 +189,49 @@ quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
   } finally {
     quoteRequestInFlight = false;
   }
+}
+
+function profileSymbol(symbol) {
+  const parts = symbol.split(":");
+  const ticker = (parts.length > 1 ? parts[1] : parts[0]).replace(/!$/, "");
+  return ticker;
+}
+
+async function fetchSymbolProfile(symbol) {
+  const key = getFinnhubKey();
+  if (!key) return null;
+  const ticker = profileSymbol(symbol);
+  const url = `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
+  const response = await fetch(url, { method: "GET" });
+  if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
+  const data = await response.json();
+  const label = data && (data.name || data.ticker) ? (data.name || data.ticker) : "";
+  if (label) {
+    symbolProfiles[symbol] = label;
+    localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
+    return label;
+  }
+  return null;
+}
+
+function getSymbolLabel(symbol) {
+  return symbolProfiles[symbol] || "";
+}
+
+async function refreshSymbolLabels() {
+  const key = getFinnhubKey();
+  if (!key) return;
+  const targets = [...new Set(Object.values(state.lists).flat())]
+    .filter(symbol => !getSymbolLabel(symbol));
+  for (const symbol of targets) {
+    try {
+      await fetchSymbolProfile(symbol);
+    } catch (err) {
+      console.warn("Libellé indisponible pour", symbol, err);
+    }
+    await new Promise(resolve => setTimeout(resolve, 80));
+  }
+  renderLists();
 }
 
 function quoteMarkup(symbol) {
@@ -247,6 +294,7 @@ function renderLists() {
       row.innerHTML = `
         <span class="symbol-name">${escapeHtml(displayName(symbol))}</span>
         <span class="symbol-meta symbol-exchange">${escapeHtml(exchangeName(symbol))}</span>
+        <span class="product-label">${escapeHtml(getSymbolLabel(symbol))}</span>
         ${quoteMarkup(symbol)}
         <span class="symbol-actions">
           <button class="small-btn delete-symbol" title="Supprimer">×</button>
@@ -351,6 +399,7 @@ function confirmModal() {
   closeModal();
   renderLists();
   selectSymbol(symbol);
+  refreshSymbolLabels();
   showToast(`${symbol} ajouté.`);
 }
 
@@ -495,6 +544,7 @@ function handleImport(event) {
       state.lists = imported;
       saveLists();
       renderLists();
+      refreshSymbolLabels();
       showToast("Watchlists importées.");
     } catch (e) {
       alert("Impossible d'importer ce fichier JSON.");
@@ -554,3 +604,9 @@ els.modal.addEventListener("click", e => {
 });
 
 renderLists();
+
+// Initialisation des cotations et des libellés, puis actualisation des cotations chaque minute.
+refreshQuotes();
+refreshSymbolLabels();
+clearInterval(quoteTimer);
+quoteTimer = setInterval(refreshQuotes, QUOTE_REFRESH_MS);
