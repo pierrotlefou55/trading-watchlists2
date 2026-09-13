@@ -1,0 +1,45 @@
+{
+  "Indices": [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "FEZ",
+    "DAX",
+    "CAC",
+    "JPXN",
+    "TLT",
+    "BNO",
+    "VIX"
+  ],
+  "Matières premières": [
+    "GOLD",
+    "SLV",
+    "EART",
+    "CPER",
+    "PLTM"
+  ],
+  "Crypto": [
+    "BTCUSD",
+    "ETHUSD",
+    "SOLUSD",
+    "XRPUSD"
+  ],
+  "PEA Positions": [
+    "LVE",
+    "ASML",
+    "CL2",
+    "MRK",
+    "TTE",
+    "ENR",
+    "AIR",
+    "BAYN",
+    "IBE",
+    "VID",
+    "RDC",
+    "LHA",
+    "BN",
+    "MTX",
+    "NAE",
+    "MLP"
+  ]
+}
