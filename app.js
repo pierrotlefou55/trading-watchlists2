@@ -69,8 +69,26 @@ try {
 // Le endpoint /quote gratuit de Finnhub ne comprend que des tickers actions/ETF US classiques.
 // Les indices (SPX, NDX, VIX, DXY) et les futures en notation continue (CL1!, NG1!) ne sont
 // pas des symboles /quote valides côté gratuit : inutile de retaper l'API à chaque minute.
+// Finnhub identifie chaque crypto par EXCHANGE:PAIRE (ex: BINANCE:BTCUSDT), jamais
+// par un ticker nu comme "BTCUSD". Mapping vers le format attendu par /quote.
+const CRYPTO_QUOTE_SYMBOLS = {
+  "BTCUSD": "BINANCE:BTCUSDT",
+  "ETHUSD": "BINANCE:ETHUSDT",
+  "SOLUSD": "BINANCE:SOLUSDT",
+  "XRPUSD": "BINANCE:XRPUSDT"
+};
+
 const KNOWN_NON_QUOTABLE = new Set([
-  "SPX", "NDX", "VIX", "DXY", "GOLD", "SILVER", "CL1", "NG1"
+  "SPX", "NDX", "VIX", "DXY", "GOLD", "SILVER", "CL1", "NG1",
+  // Indices non cotables tels quels (pas de vrai ticker Finnhub derrière) :
+  "DAX", "CAC",
+  // Positions PEA (Euronext/Xetra/BME) hors du plan gratuit Finnhub (US only).
+  // Certaines collisionnent carrément avec une société américaine DIFFÉRENTE :
+  // AIR->AAR Corp, BN->Brookfield, MRK->Merck & Co (pas Merck KGaA),
+  // ENR->Energizer, MTX->Minerals Technologies. On bloque tout le lot plutôt
+  // que de risquer d'afficher la variation d'une autre entreprise en silence.
+  "LVE", "CL2", "MRK", "ENR", "AIR", "BAYN", "IBE", "VID", "RDC", "LHA",
+  "BN", "MTX", "NAE", "MLP"
 ]);
 
 function markQuoteUnavailable(symbol) {
@@ -118,7 +136,11 @@ const KNOWN_LABELS = {
   "GOLD": "Gold Spot",
   "SILVER": "Silver Spot",
   "CL1": "WTI Crude Oil Futures",
-  "NG1": "Natural Gas Futures"
+  "NG1": "Natural Gas Futures",
+  "BTCUSD": "Bitcoin / US Dollar",
+  "ETHUSD": "Ethereum / US Dollar",
+  "SOLUSD": "Solana / US Dollar",
+  "XRPUSD": "XRP / US Dollar"
 };
 
 
@@ -206,10 +228,14 @@ function saveQuotesSettings() {
 
 function quoteSymbol(symbol) {
   const [exchange, ticker] = symbol.split(":");
-  if (!ticker) return ticker || symbol;
+  if (!ticker) {
+    const bare = ticker || symbol;
+    return CRYPTO_QUOTE_SYMBOLS[bare] || bare;
+  }
   // Finnhub's free quote endpoint covers US-listed stocks and ETFs.
   // Keep the raw ticker; exchange prefixes are TradingView-specific here.
-  return ticker.replace(/!$/, "");
+  const clean = ticker.replace(/!$/, "");
+  return CRYPTO_QUOTE_SYMBOLS[clean] || clean;
 }
 
 async function fetchQuote(symbol) {
