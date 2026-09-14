@@ -70,8 +70,7 @@ try {
 // Les indices (SPX, NDX, VIX, DXY) et les futures en notation continue (CL1!, NG1!) ne sont
 // pas des symboles /quote valides côté gratuit : inutile de retaper l'API à chaque minute.
 const KNOWN_NON_QUOTABLE = new Set([
-  "SP:SPX", "NASDAQ:NDX", "TVC:VIX", "TVC:DXY", "TVC:GOLD", "TVC:SILVER",
-  "NYMEX:CL1!", "NYMEX:NG1!"
+  "SPX", "NDX", "VIX", "DXY", "GOLD", "SILVER", "CL1", "NG1"
 ]);
 
 function markQuoteUnavailable(symbol) {
@@ -86,13 +85,14 @@ function clearQuoteUnavailable(symbol) {
 }
 
 function isQuoteSkippable(symbol) {
-  if (KNOWN_NON_QUOTABLE.has(symbol)) return true;
+  if (KNOWN_NON_QUOTABLE.has(quoteSymbol(symbol))) return true;
   const failedAt = quoteUnavailable[symbol];
   return typeof failedAt === "number" && (Date.now() - failedAt) < QUOTE_RETRY_COOLDOWN_MS;
 }
 
-const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v4";
-let symbolProfiles = {};
+const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v5";
+const PROFILE_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h, même logique que les cotations
+let symbolProfiles = {}; // symbol -> { label: string, checkedAt: number }
 try {
   symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
 } catch (e) {
@@ -105,20 +105,20 @@ try {
 // We short-circuit those with a small local dictionary so their label is instant,
 // reliable, and costs zero API calls.
 const KNOWN_LABELS = {
-  "AMEX:SPY": "SPDR S&P 500 ETF Trust",
-  "NASDAQ:QQQ": "Invesco QQQ Trust",
-  "AMEX:GLD": "SPDR Gold Shares",
-  "NASDAQ:TLT": "iShares 20+ Year Treasury Bond ETF",
-  "AMEX:SLV": "iShares Silver Trust",
-  "AMEX:IWM": "iShares Russell 2000 ETF",
-  "SP:SPX": "S&P 500 Index",
-  "NASDAQ:NDX": "Nasdaq-100 Index",
-  "TVC:VIX": "CBOE Volatility Index",
-  "TVC:DXY": "US Dollar Index",
-  "TVC:GOLD": "Gold Spot",
-  "TVC:SILVER": "Silver Spot",
-  "NYMEX:CL1!": "WTI Crude Oil Futures",
-  "NYMEX:NG1!": "Natural Gas Futures"
+  "SPY": "SPDR S&P 500 ETF Trust",
+  "QQQ": "Invesco QQQ Trust",
+  "GLD": "SPDR Gold Shares",
+  "TLT": "iShares 20+ Year Treasury Bond ETF",
+  "SLV": "iShares Silver Trust",
+  "IWM": "iShares Russell 2000 ETF",
+  "SPX": "S&P 500 Index",
+  "NDX": "Nasdaq-100 Index",
+  "VIX": "CBOE Volatility Index",
+  "DXY": "US Dollar Index",
+  "GOLD": "Gold Spot",
+  "SILVER": "Silver Spot",
+  "CL1": "WTI Crude Oil Futures",
+  "NG1": "Natural Gas Futures"
 };
 
 
@@ -268,23 +268,35 @@ function profileSymbol(symbol) {
 }
 
 function cacheLabel(symbol, label) {
-  // "" is a valid cached outcome: it means "we looked, Finnhub has nothing for
-  // this symbol on the free tier". That stops refreshSymbolLabels from retrying
-  // it forever and burning the 60 calls/minute free quota on the same misses.
-  symbolProfiles[symbol] = label;
+  // "" est un résultat valide : "on a cherché, Finnhub n'a rien pour ce symbole
+  // en gratuit". On retentera quand même après un délai (cooldown), au lieu de
+  // bloquer définitivement, pour couvrir le cas de tickers momentanément en échec.
+  symbolProfiles[symbol] = { label, checkedAt: Date.now() };
   localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
+}
+
+function getSymbolLabel(symbol) {
+  const entry = symbolProfiles[symbol];
+  return entry && entry.label ? entry.label : "";
+}
+
+function shouldSkipLabelFetch(symbol) {
+  const entry = symbolProfiles[symbol];
+  if (!entry) return false;
+  if (entry.label) return true;
+  return (Date.now() - entry.checkedAt) < PROFILE_RETRY_COOLDOWN_MS;
 }
 
 async function fetchSymbolProfile(symbol) {
   const key = getFinnhubKey();
   if (!key) return null;
 
-  if (KNOWN_LABELS[symbol]) {
-    cacheLabel(symbol, KNOWN_LABELS[symbol]);
-    return KNOWN_LABELS[symbol];
-  }
-
   const ticker = profileSymbol(symbol);
+
+  if (KNOWN_LABELS[ticker]) {
+    cacheLabel(symbol, KNOWN_LABELS[ticker]);
+    return KNOWN_LABELS[ticker];
+  }
 
   // 1) stock/profile2: works for company stocks, empty {} for ETFs/indices/futures.
   try {
@@ -325,10 +337,6 @@ async function fetchSymbolProfile(symbol) {
   return null;
 }
 
-function getSymbolLabel(symbol) {
-  return symbolProfiles[symbol] || "";
-}
-
 async function refreshSymbolLabels() {
   if (labelsRequestInFlight) return;
   const key = getFinnhubKey();
@@ -336,10 +344,8 @@ async function refreshSymbolLabels() {
 
   labelsRequestInFlight = true;
   try {
-    // Only fetch symbols never looked up before (undefined), not just "no label yet" -
-    // a cached "" means we already tried and Finnhub has nothing, so skip it.
     const targets = [...new Set(Object.values(state.lists).flat())]
-      .filter(symbol => symbolProfiles[symbol] === undefined);
+      .filter(symbol => !shouldSkipLabelFetch(symbol));
     for (const symbol of targets) {
       try {
         await fetchSymbolProfile(symbol);
