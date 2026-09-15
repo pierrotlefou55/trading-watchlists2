@@ -50,27 +50,84 @@ let state = {
   drag: null
 };
 
-const FINNHUB_KEY_STORAGE = "finnhub-api-key-v1";
-const QUOTE_REFRESH_MS = 60000;
 let quoteTimer = null;
 let quoteRequestInFlight = false;
 let labelsRequestInFlight = false;
 let quoteValues = {};
 
-const QUOTE_UNAVAILABLE_STORAGE = "trading-quote-unavailable-v2";
-const QUOTE_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h: on retente de temps en temps, au cas où Finnhub couvrirait un jour ce symbole
-let quoteUnavailable = {};
-try {
-  quoteUnavailable = JSON.parse(localStorage.getItem(QUOTE_UNAVAILABLE_STORAGE) || "{}");
-} catch (e) {
-  quoteUnavailable = {};
+// ---------------------------------------------------------------------------
+// #2 — Cache générique à expiration négative.
+// Un seul mécanisme pour "on a déjà tenté ce symbole, voici le résultat",
+// réutilisé pour les cotations (succès jamais persisté : elles doivent
+// toujours être fraîches) et les libellés (succès persisté indéfiniment,
+// un nom d'ETF ne change pas). Avant ce refactor, ces deux caches étaient
+// dupliqués avec une logique légèrement différente à chaque fois.
+// ---------------------------------------------------------------------------
+function createResultCache(storageKey, { cooldownMs, persistSuccess }) {
+  let store = {};
+  try {
+    store = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  } catch (e) {
+    store = {};
+  }
+  function persist() {
+    localStorage.setItem(storageKey, JSON.stringify(store));
+  }
+  return {
+    recordSuccess(key, value) {
+      if (persistSuccess) {
+        store[key] = { ok: true, value, checkedAt: Date.now() };
+        persist();
+      } else if (store[key] !== undefined) {
+        delete store[key];
+        persist();
+      }
+    },
+    recordFailure(key) {
+      store[key] = { ok: false, checkedAt: Date.now() };
+      persist();
+    },
+    getValue(key) {
+      const entry = store[key];
+      return entry && entry.ok ? entry.value : undefined;
+    },
+    shouldSkip(key) {
+      const entry = store[key];
+      if (!entry) return false;
+      if (entry.ok) return persistSuccess;
+      return (Date.now() - entry.checkedAt) < cooldownMs;
+    }
+  };
 }
 
-// Le endpoint /quote gratuit de Finnhub ne comprend que des tickers actions/ETF US classiques.
-// Les indices (SPX, NDX, VIX, DXY) et les futures en notation continue (CL1!, NG1!) ne sont
-// pas des symboles /quote valides côté gratuit : inutile de retaper l'API à chaque minute.
-// Finnhub identifie chaque crypto par EXCHANGE:PAIRE (ex: BINANCE:BTCUSDT), jamais
-// par un ticker nu comme "BTCUSD". Mapping vers le format attendu par /quote.
+const RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h avant de retenter un échec
+
+const quoteCache = createResultCache("trading-quote-unavailable-v3", {
+  cooldownMs: RETRY_COOLDOWN_MS,
+  persistSuccess: false
+});
+
+const labelCache = createResultCache("trading-symbol-profiles-v6", {
+  cooldownMs: RETRY_COOLDOWN_MS,
+  persistSuccess: true
+});
+
+// ---------------------------------------------------------------------------
+// #1 — Résolution de symbole + routage multi-provider.
+// bareTicker() est le SEUL endroit qui parse "EXCHANGE:TICKER" pour en tirer
+// le ticker nu ; resolveQuoteRoute() est le SEUL endroit qui décide quel
+// provider (ou aucun) interroger pour un symbole donné. Avant ce refactor,
+// ces deux responsabilités étaient éparpillées dans quoteSymbol/profileSymbol/
+// KNOWN_NON_QUOTABLE/CRYPTO_QUOTE_SYMBOLS — exactement la dispersion qui a causé
+// les bugs précédents (libellés mal indexés, tickers PEA à risque de collision).
+// ---------------------------------------------------------------------------
+function bareTicker(symbol) {
+  const parts = symbol.split(":");
+  const ticker = parts.length > 1 ? parts[1] : parts[0];
+  return ticker.replace(/!$/, "");
+}
+
+// Finnhub identifie chaque crypto par EXCHANGE:PAIRE (ex: BINANCE:BTCUSDT).
 const CRYPTO_QUOTE_SYMBOLS = {
   "BTCUSD": "BINANCE:BTCUSDT",
   "ETHUSD": "BINANCE:ETHUSDT",
@@ -78,43 +135,95 @@ const CRYPTO_QUOTE_SYMBOLS = {
   "XRPUSD": "BINANCE:XRPUSDT"
 };
 
-const KNOWN_NON_QUOTABLE = new Set([
-  "SPX", "NDX", "VIX", "DXY", "GOLD", "SILVER", "CL1", "NG1",
-  // Indices non cotables tels quels (pas de vrai ticker Finnhub derrière) :
-  "DAX", "CAC",
-  // Positions PEA (Euronext/Xetra/BME) hors du plan gratuit Finnhub (US only).
-  // Certaines collisionnent carrément avec une société américaine DIFFÉRENTE :
-  // AIR->AAR Corp, BN->Brookfield, MRK->Merck & Co (pas Merck KGaA),
-  // ENR->Energizer, MTX->Minerals Technologies. On bloque tout le lot plutôt
-  // que de risquer d'afficher la variation d'une autre entreprise en silence.
-  "LVE", "CL2", "MRK", "ENR", "AIR", "BAYN", "IBE", "VID", "RDC", "LHA",
-  "BN", "MTX", "NAE", "MLP"
-]);
+// Le endpoint /quote gratuit de Finnhub ne couvre que les actions/ETF US,
+// le forex et la crypto. Indices et futures en notation continue échouent
+// systématiquement -> inutile de les interroger.
+const FINNHUB_UNQUOTABLE = new Set(["SPX", "NDX", "VIX", "DXY", "GOLD", "SILVER", "CL1", "NG1", "DAX", "CAC"]);
 
-function markQuoteUnavailable(symbol) {
-  quoteUnavailable[symbol] = Date.now();
-  localStorage.setItem(QUOTE_UNAVAILABLE_STORAGE, JSON.stringify(quoteUnavailable));
+// #4 — Positions PEA (Euronext/Xetra/BME) routées vers Twelve Data plutôt que
+// bloquées. Codes d'exchange Twelve Data à confirmer empiriquement (pas testés
+// avec une vraie clé) : "Euronext", "XETRA", "BME" sont les noms documentés,
+// mais si un ticker ne matche rien, vérifiez le nom exact via /symbol_search.
+const TWELVEDATA_ROUTES = {
+  "LVE": "Euronext",
+  "CL2": "Euronext",
+  "AIR": "Euronext",
+  "BN": "Euronext",
+  "MRK": "XETRA",
+  "ENR": "XETRA",
+  "BAYN": "XETRA",
+  "LHA": "XETRA",
+  "MTX": "XETRA",
+  "IBE": "BME",
+  "VID": "BME"
+};
+
+// Tickers dont je ne suis pas assez sûr de la place de cotation pour router
+// en confiance (RDC, NAE, MLP sont ambigus) : mieux vaut bloquer que risquer
+// d'afficher la variation d'un autre titre.
+const UNRESOLVED_TICKERS = new Set(["RDC", "NAE", "MLP"]);
+
+function resolveQuoteRoute(symbol) {
+  const ticker = bareTicker(symbol);
+  if (CRYPTO_QUOTE_SYMBOLS[ticker]) {
+    return { provider: "finnhub", ticker: CRYPTO_QUOTE_SYMBOLS[ticker] };
+  }
+  if (TWELVEDATA_ROUTES[ticker]) {
+    return { provider: "twelvedata", ticker, exchange: TWELVEDATA_ROUTES[ticker] };
+  }
+  if (FINNHUB_UNQUOTABLE.has(ticker) || UNRESOLVED_TICKERS.has(ticker)) {
+    return null; // volontairement non routé (voir commentaires ci-dessus)
+  }
+  return { provider: "finnhub", ticker };
 }
 
-function clearQuoteUnavailable(symbol) {
-  if (quoteUnavailable[symbol] === undefined) return;
-  delete quoteUnavailable[symbol];
-  localStorage.setItem(QUOTE_UNAVAILABLE_STORAGE, JSON.stringify(quoteUnavailable));
+const FINNHUB_KEY_STORAGE = "finnhub-api-key-v1";
+const TWELVEDATA_KEY_STORAGE = "twelvedata-api-key-v1";
+const QUOTE_REFRESH_MS = 60000;
+
+function getFinnhubKey() {
+  return localStorage.getItem(FINNHUB_KEY_STORAGE) || "";
 }
 
-function isQuoteSkippable(symbol) {
-  if (KNOWN_NON_QUOTABLE.has(quoteSymbol(symbol))) return true;
-  const failedAt = quoteUnavailable[symbol];
-  return typeof failedAt === "number" && (Date.now() - failedAt) < QUOTE_RETRY_COOLDOWN_MS;
+function getTwelveDataKey() {
+  return localStorage.getItem(TWELVEDATA_KEY_STORAGE) || "";
 }
 
-const PROFILE_CACHE_STORAGE = "trading-symbol-profiles-v5";
-const PROFILE_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h, même logique que les cotations
-let symbolProfiles = {}; // symbol -> { label: string, checkedAt: number }
-try {
-  symbolProfiles = JSON.parse(localStorage.getItem(PROFILE_CACHE_STORAGE) || "{}");
-} catch (e) {
-  symbolProfiles = {};
+// Registre de providers : chaque provider expose isConfigured(), delayMs
+// (espacement entre deux appels, propre à son rate limit) et fetchQuote().
+// Ajouter un futur provider = un objet de plus ici, rien d'autre à toucher.
+const QuoteProviders = {
+  finnhub: {
+    isConfigured: () => !!getFinnhubKey(),
+    delayMs: 80,
+    async fetchQuote(route) {
+      const key = getFinnhubKey();
+      const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(route.ticker)}&token=${encodeURIComponent(key)}`;
+      const response = await fetch(url, { method: "GET" });
+      if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
+      const data = await response.json();
+      if (!data || typeof data.dp !== "number") return null;
+      return { percent: data.dp, price: data.c, timestamp: data.t };
+    }
+  },
+  twelvedata: {
+    isConfigured: () => !!getTwelveDataKey(),
+    delayMs: 8000, // plan gratuit : 8 requêtes/minute max, donc rafraîchissement plus lent
+    async fetchQuote(route) {
+      const key = getTwelveDataKey();
+      const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(route.ticker)}&exchange=${encodeURIComponent(route.exchange)}&apikey=${encodeURIComponent(key)}`;
+      const response = await fetch(url, { method: "GET" });
+      if (!response.ok) throw new Error(`Twelve Data HTTP ${response.status}`);
+      const data = await response.json();
+      const percent = data && data.percent_change !== undefined ? Number(data.percent_change) : NaN;
+      if (!Number.isFinite(percent)) return null;
+      return { percent, price: Number(data.close), timestamp: null };
+    }
+  }
+};
+
+function hasAnyQuoteProviderConfigured() {
+  return QuoteProviders.finnhub.isConfigured() || QuoteProviders.twelvedata.isConfigured();
 }
 
 // Finnhub's free "stock/profile2" endpoint only covers equities (company profiles).
@@ -160,6 +269,7 @@ const els = {
   quotesSettingsBtn: document.querySelector("#quotesSettingsBtn"),
   quotesModal: document.querySelector("#quotesModal"),
   finnhubKeyInput: document.querySelector("#finnhubKeyInput"),
+  twelvedataKeyInput: document.querySelector("#twelvedataKeyInput"),
   cancelQuotesBtn: document.querySelector("#cancelQuotesBtn"),
   saveQuotesBtn: document.querySelector("#saveQuotesBtn"),
   modal: document.querySelector("#modal"),
@@ -196,12 +306,9 @@ function tvUrl(symbol) {
   return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
 }
 
-function getFinnhubKey() {
-  return localStorage.getItem(FINNHUB_KEY_STORAGE) || "";
-}
-
 function openQuotesSettings() {
   els.finnhubKeyInput.value = getFinnhubKey();
+  els.twelvedataKeyInput.value = getTwelveDataKey();
   els.quotesModal.classList.remove("hidden");
   setTimeout(() => els.finnhubKeyInput.focus(), 0);
 }
@@ -218,68 +325,54 @@ async function refreshAll() {
 }
 
 function saveQuotesSettings() {
-  const key = els.finnhubKeyInput.value.trim();
-  if (key) localStorage.setItem(FINNHUB_KEY_STORAGE, key);
+  const finnhubKey = els.finnhubKeyInput.value.trim();
+  if (finnhubKey) localStorage.setItem(FINNHUB_KEY_STORAGE, finnhubKey);
   else localStorage.removeItem(FINNHUB_KEY_STORAGE);
+
+  const twelvedataKey = els.twelvedataKeyInput.value.trim();
+  if (twelvedataKey) localStorage.setItem(TWELVEDATA_KEY_STORAGE, twelvedataKey);
+  else localStorage.removeItem(TWELVEDATA_KEY_STORAGE);
+
   closeQuotesSettings();
-  showToast(key ? "Clé Finnhub enregistrée." : "Cotations désactivées.");
+  showToast(hasAnyQuoteProviderConfigured() ? "Clés enregistrées." : "Cotations désactivées.");
   refreshAll();
-}
-
-function quoteSymbol(symbol) {
-  const [exchange, ticker] = symbol.split(":");
-  if (!ticker) {
-    const bare = ticker || symbol;
-    return CRYPTO_QUOTE_SYMBOLS[bare] || bare;
-  }
-  // Finnhub's free quote endpoint covers US-listed stocks and ETFs.
-  // Keep the raw ticker; exchange prefixes are TradingView-specific here.
-  const clean = ticker.replace(/!$/, "");
-  return CRYPTO_QUOTE_SYMBOLS[clean] || clean;
-}
-
-async function fetchQuote(symbol) {
-  const key = getFinnhubKey();
-  if (!key) return null;
-  const ticker = quoteSymbol(symbol);
-  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(key)}`;
-  const response = await fetch(url, { method: "GET" });
-  if (!response.ok) throw new Error(`Finnhub HTTP ${response.status}`);
-  const data = await response.json();
-  if (!data || typeof data.dp !== "number") return null;
-  return { percent: data.dp, price: data.c, timestamp: data.t };
 }
 
 async function refreshQuotes() {
   if (quoteRequestInFlight) return;
-  const key = getFinnhubKey();
-  if (!key) {
+  if (!hasAnyQuoteProviderConfigured()) {
     renderLists();
     return;
   }
 
   quoteRequestInFlight = true;
-  // On ne cible que les symboles réellement cotables ; les indices/futures connus
-  // et les échecs récents (cooldown 6h) sont exclus avant même le premier appel.
+  // On ne cible que les symboles routés vers un provider configuré et pas en
+  // cooldown (échec récent) ; tout le routage vient de resolveQuoteRoute().
   const targets = [...new Set(Object.values(state.lists).flat())]
-    .filter(symbol => !isQuoteSkippable(symbol));
+    .map(symbol => ({ symbol, route: resolveQuoteRoute(symbol) }))
+    .filter(({ symbol, route }) => {
+      if (!route) return false;
+      if (!QuoteProviders[route.provider].isConfigured()) return false;
+      return !quoteCache.shouldSkip(symbol);
+    });
 
   try {
-    // Small delay between calls avoids bursting the API and makes rate limiting less likely.
-    for (const symbol of targets) {
+    for (const { symbol, route } of targets) {
+      const provider = QuoteProviders[route.provider];
       try {
-        const q = await fetchQuote(symbol);
+        const q = await provider.fetchQuote(route);
         if (q) {
           quoteValues[symbol] = q;
-          clearQuoteUnavailable(symbol);
+          quoteCache.recordSuccess(symbol);
         } else {
-          markQuoteUnavailable(symbol);
+          quoteCache.recordFailure(symbol);
         }
       } catch (err) {
         console.warn("Quote unavailable for", symbol, err);
-        markQuoteUnavailable(symbol);
+        quoteCache.recordFailure(symbol);
       }
-      await new Promise(resolve => setTimeout(resolve, 80));
+      // Délai propre à chaque provider (80ms Finnhub, 8s Twelve Data en gratuit).
+      await new Promise(resolve => setTimeout(resolve, provider.delayMs));
     }
     renderLists();
   } finally {
@@ -287,40 +380,18 @@ async function refreshQuotes() {
   }
 }
 
-function profileSymbol(symbol) {
-  const parts = symbol.split(":");
-  const ticker = (parts.length > 1 ? parts[1] : parts[0]).replace(/!$/, "");
-  return ticker;
-}
-
-function cacheLabel(symbol, label) {
-  // "" est un résultat valide : "on a cherché, Finnhub n'a rien pour ce symbole
-  // en gratuit". On retentera quand même après un délai (cooldown), au lieu de
-  // bloquer définitivement, pour couvrir le cas de tickers momentanément en échec.
-  symbolProfiles[symbol] = { label, checkedAt: Date.now() };
-  localStorage.setItem(PROFILE_CACHE_STORAGE, JSON.stringify(symbolProfiles));
-}
-
 function getSymbolLabel(symbol) {
-  const entry = symbolProfiles[symbol];
-  return entry && entry.label ? entry.label : "";
-}
-
-function shouldSkipLabelFetch(symbol) {
-  const entry = symbolProfiles[symbol];
-  if (!entry) return false;
-  if (entry.label) return true;
-  return (Date.now() - entry.checkedAt) < PROFILE_RETRY_COOLDOWN_MS;
+  return labelCache.getValue(symbol) || "";
 }
 
 async function fetchSymbolProfile(symbol) {
   const key = getFinnhubKey();
   if (!key) return null;
 
-  const ticker = profileSymbol(symbol);
+  const ticker = bareTicker(symbol);
 
   if (KNOWN_LABELS[ticker]) {
-    cacheLabel(symbol, KNOWN_LABELS[ticker]);
+    labelCache.recordSuccess(symbol, KNOWN_LABELS[ticker]);
     return KNOWN_LABELS[ticker];
   }
 
@@ -332,7 +403,7 @@ async function fetchSymbolProfile(symbol) {
     const data = await response.json();
     const label = data && typeof data.name === "string" ? data.name.trim() : "";
     if (label) {
-      cacheLabel(symbol, label);
+      labelCache.recordSuccess(symbol, label);
       return label;
     }
   } catch (err) {
@@ -351,7 +422,7 @@ async function fetchSymbolProfile(symbol) {
       : null;
     const label = match && typeof match.description === "string" ? match.description.trim() : "";
     if (label) {
-      cacheLabel(symbol, label);
+      labelCache.recordSuccess(symbol, label);
       return label;
     }
   } catch (err) {
@@ -359,7 +430,7 @@ async function fetchSymbolProfile(symbol) {
   }
 
   // Nothing found anywhere: cache the miss so we don't retry every refresh.
-  cacheLabel(symbol, "");
+  labelCache.recordFailure(symbol);
   return null;
 }
 
@@ -371,7 +442,7 @@ async function refreshSymbolLabels() {
   labelsRequestInFlight = true;
   try {
     const targets = [...new Set(Object.values(state.lists).flat())]
-      .filter(symbol => !shouldSkipLabelFetch(symbol));
+      .filter(symbol => !labelCache.shouldSkip(symbol));
     for (const symbol of targets) {
       try {
         await fetchSymbolProfile(symbol);
@@ -391,10 +462,18 @@ async function refreshSymbolLabels() {
 
 function quoteMarkup(symbol) {
   const q = quoteValues[symbol];
-  if (!q || !Number.isFinite(q.percent)) return `<span class="quote-change muted">—</span>`;
-  const cls = q.percent > 0 ? "up" : q.percent < 0 ? "down" : "muted";
-  const sign = q.percent > 0 ? "+" : "";
-  return `<span class="quote-change ${cls}" title="Variation du jour">${sign}${q.percent.toFixed(2).replace(".", ",")} %</span>`;
+  if (q && Number.isFinite(q.percent)) {
+    const cls = q.percent > 0 ? "up" : q.percent < 0 ? "down" : "muted";
+    const sign = q.percent > 0 ? "+" : "";
+    return `<span class="quote-change ${cls}" title="Variation du jour">${sign}${q.percent.toFixed(2).replace(".", ",")} %</span>`;
+  }
+  // Distingue "non routé par design" (marché non couvert) d'un simple échec
+  // réseau temporaire, pour que le survol du tiret soit informatif.
+  const route = resolveQuoteRoute(symbol);
+  const title = !route
+    ? "Cotation non disponible pour ce marché (aucun fournisseur configuré ne le couvre)"
+    : "Cotation indisponible pour le moment";
+  return `<span class="quote-change muted" title="${title}">—</span>`;
 }
 
 function renderLists() {
